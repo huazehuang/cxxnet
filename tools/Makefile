@@ -32,7 +32,7 @@ export NVCCFLAGS = -g -O3 -ccbin $(CXX)
 
 # specify tensor path
 BIN = im2bin
-CONVBIN = convertMean convert
+CONVBIN = convert_mean convert
 OBJ =
 CUOBJ =
 CUBIN =

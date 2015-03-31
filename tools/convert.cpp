@@ -1,3 +1,9 @@
+/*!
+ * \file convert.cpp
+ * \brief convert caffe model to cxx model
+ * \author Zehua Huang
+ */
+
 #define _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_DEPRECATE
 
@@ -20,160 +26,160 @@
 
 using namespace std;
 namespace cxxnet {
-    class CaffeConverter {
-    public:
-        CaffeConverter(){
-            this->net_type = 0;
-        }
+  class CaffeConverter {
+  public:
+    CaffeConverter() {
+      this->net_type_ = 0;
+    }
 
-        ~CaffeConverter(){
-            if (net_trainer != NULL) {
-                delete net_trainer;
+    ~CaffeConverter() {
+    if (net_trainer_ != NULL) {
+      delete net_trainer_;
+    }
+    }
+
+    void Convert(int argc, char *argv[]) {
+      if (argc != 5) {
+        printf("Usage: <caffe_proto> <caffe_model> <cxx_config> <cxx_model_output>");
+        return;
+      }
+
+      this->InitCaffe(argv[1], argv[2]);
+      this->InitCXX(argv[3]);
+      this->TransferNet();
+      this->SaveModel(argv[4]);
+    }
+
+  private:
+    inline void InitCaffe(const char *network_params, const char *network_snapshot) {
+      caffe::Caffe::set_mode(caffe::Caffe::CPU);
+
+      caffe_net_.reset(new caffe::Net<float>(network_params, caffe::TEST));
+      caffe_net_->CopyTrainedLayersFrom(network_snapshot);
+    }
+
+    inline void InitCXX(const char *configPath) {
+      utils::ConfigIterator itr(configPath);
+      while (itr.Next()) {
+        this->SetParam(itr.name(), itr.val());
+      }
+
+      net_trainer_ = (nnet::CXXNetThreadTrainer<cpu>*)this->CreateNet();
+      net_trainer_->InitModel();
+    }
+
+    inline void TransferNet() {
+      const vector<caffe::shared_ptr<caffe::Layer<float> > >& caffe_layers = caffe_net_->layers();
+      const vector<string> & layer_names = caffe_net_->layer_names();
+
+      for (size_t i = 0; i < layer_names.size(); ++i) {
+        if (caffe::InnerProductLayer<float> *caffe_layer = dynamic_cast<caffe::InnerProductLayer<float> *>(caffe_layers[i].get())) {
+          printf("Dumping InnerProductLayer %s\n", layer_names[i].c_str());
+
+          vector<caffe::shared_ptr<caffe::Blob<float> > >& blobs = caffe_layer->blobs();
+          caffe::Blob<float> &caffe_weight = *blobs[0];
+          caffe::Blob<float> &caffe_bias = *blobs[1];
+
+          mshadow::TensorContainer<mshadow::cpu, 2> weight;
+          weight.Resize(mshadow::Shape2(caffe_weight.num(), caffe_weight.channels()));
+          for (int n = 0; n < caffe_weight.num(); n++) {
+            for (int c = 0; c < caffe_weight.channels(); c++) {
+              weight[n][c] = caffe_weight.data_at(n, c, 0, 0);
             }
+          }
+
+          mshadow::TensorContainer<mshadow::cpu, 2> bias;
+          bias.Resize(mshadow::Shape2(caffe_bias.count(), 1));
+          for (int b = 0; b < caffe_bias.count(); b++) {
+            bias[b] = caffe_bias.data_at(b, 0, 0, 0);
+          }
+
+          net_trainer_->SetWeight(weight, layer_names[i].c_str(), "wmat");
+          net_trainer_->SetWeight(bias, layer_names[i].c_str(), "bias");
+
+        } else if (caffe::ConvolutionLayer<float> *caffe_layer = dynamic_cast<caffe::ConvolutionLayer<float> *>(caffe_layers[i].get())) {
+          printf("Dumping ConvolutionLayer %s\n", layer_names[i].c_str());
+
+          vector<caffe::shared_ptr<caffe::Blob<float> > >& blobs = caffe_layer->blobs();
+          caffe::Blob<float> &caffe_weight = *blobs[0];
+          caffe::Blob<float> &caffe_bias = *blobs[1];
+
+          mshadow::TensorContainer<mshadow::cpu, 2> weight;
+          weight.Resize(mshadow::Shape2(caffe_weight.num(),
+              caffe_weight.count() / caffe_weight.num()));
+
+          for (int n = 0; n < caffe_weight.num(); n++) {
+            for (int c = 0; c < caffe_weight.channels(); c++) {
+              for (int h = 0; h < caffe_weight.height(); h++) {
+                for (int w = 0; w < caffe_weight.width(); w++) {
+                  float data;
+                  if (i==0) {
+                    data = caffe_weight.data_at(n, 2 - c, h, w);
+                  } else {
+                    data = caffe_weight.data_at(n, c, h, w);
+                  }
+
+                  weight[n][(c * caffe_weight.height() +
+                         h) * caffe_weight.width() +
+                         w] = data;
+                } // width
+              } // height
+            } // channel
+          } // num
+
+          mshadow::TensorContainer<mshadow::cpu, 2> bias;
+          bias.Resize(mshadow::Shape2(caffe_bias.count(), 1));
+          for (int b = 0; b < caffe_bias.count(); b++) {
+            bias[b] = caffe_bias.data_at(b, 0, 0, 0);
+          }
+
+          net_trainer_->SetWeight(weight, layer_names[i].c_str(), "wmat");
+          net_trainer_->SetWeight(bias, layer_names[i].c_str(), "bias");
+
+        } else {
+          printf("Ignoring layer %s\n", layer_names[i].c_str());
         }
+      }
+    }
 
-        void convert(int argc, char *argv[]){
-            if (argc != 5){
-                printf("Usage: <caffe_proto> <caffe_model> <cxx_config> <cxx_model_output>");
-                return;
-            }
+    inline void SaveModel(const char *savePath) {
+      FILE *fo  = utils::FopenCheck(savePath, "wb");
+      fwrite(&net_type_, sizeof(int), 1, fo);
+      utils::FileStream fs(fo);
+      net_trainer_->SaveModel(fs);
+      fclose(fo);
+      printf("Model saved\n");
+    }
 
-            this->initCaffe(argv[1], argv[2]);
-            this->initCXX(argv[3]);
-            this->transferNet();
-            this->SaveModel(argv[4]);
-        }
+    inline void SetParam(const char *name , const char *val) {
+      cfg_.push_back(std::make_pair(std::string(name), std::string(val)));
+    }
 
-    private:
-        inline void initCaffe(const char *network_params, const char *network_snapshot){
-            caffe::Caffe::set_mode(caffe::Caffe::CPU);
+    // create a neural net
+    inline nnet::INetTrainer* CreateNet(void) {
+      nnet::INetTrainer *net = nnet::CreateNet<mshadow::cpu>(net_type_);
 
-            caffe_net.reset(new caffe::Net<float>(network_params, caffe::TEST));
-            caffe_net->CopyTrainedLayersFrom(network_snapshot);
-        }
+      for (size_t i = 0; i < cfg_.size(); ++ i) {
+        net->SetParam(cfg_[i].first.c_str(), cfg_[i].second.c_str());
+      }
+      return net;
+    }
 
-        inline void initCXX(const char *configPath){
-            utils::ConfigIterator itr(configPath);
-            while (itr.Next()) {
-                this->SetParam(itr.name(), itr.val());
-            }
-
-            net_trainer = (nnet::CXXNetThreadTrainer<cpu>*)this->CreateNet();
-            net_trainer->InitModel();
-        }
-
-        inline void transferNet(){
-            const vector<caffe::shared_ptr<caffe::Layer<float> > >& caffeLayers = caffe_net->layers();
-            const vector<string> & layer_names = caffe_net->layer_names();
-
-            for (size_t i = 0; i < layer_names.size(); ++i) {
-                if (caffe::InnerProductLayer<float> *caffeLayer = dynamic_cast<caffe::InnerProductLayer<float> *>(caffeLayers[i].get())) {
-                    printf("Dumping InnerProductLayer %s\n", layer_names[i].c_str());
-
-                    vector<caffe::shared_ptr<caffe::Blob<float> > >& blobs = caffeLayer->blobs();
-                    caffe::Blob<float> &caffeWeight = *blobs[0];
-                    caffe::Blob<float> &caffeBias = *blobs[1];
-
-                    mshadow::TensorContainer<mshadow::cpu, 2> weight;
-                    weight.Resize(mshadow::Shape2(caffeWeight.num(), caffeWeight.channels()));
-                    for(int n = 0; n < caffeWeight.num(); n++){
-                        for(int c = 0; c < caffeWeight.channels(); c++){
-                            weight[n][c] = caffeWeight.data_at(n, c, 0, 0);
-                        }
-                    }
-
-                    mshadow::TensorContainer<mshadow::cpu, 2> bias;
-                    bias.Resize(mshadow::Shape2(caffeBias.count(), 1));
-                    for(int b = 0; b < caffeBias.count(); b++){
-                        bias[b] = caffeBias.data_at(b, 0, 0, 0);
-                    }
-
-                    net_trainer->SetWeight(weight, layer_names[i].c_str(), "wmat");
-                    net_trainer->SetWeight(bias, layer_names[i].c_str(), "bias");
-
-                } else if (caffe::ConvolutionLayer<float> *caffeLayer = dynamic_cast<caffe::ConvolutionLayer<float> *>(caffeLayers[i].get())) {
-                    printf("Dumping ConvolutionLayer %s\n", layer_names[i].c_str());
-
-                    vector<caffe::shared_ptr<caffe::Blob<float> > >& blobs = caffeLayer->blobs();
-                    caffe::Blob<float> &caffeWeight = *blobs[0];
-                    caffe::Blob<float> &caffeBias = *blobs[1];
-
-
-                    mshadow::TensorContainer<mshadow::cpu, 2> weight;
-                    weight.Resize(mshadow::Shape2(caffeWeight.num(),
-                            caffeWeight.count() / caffeWeight.num()));
-
-                    for(int n = 0; n < caffeWeight.num(); n++){
-                        for(int c = 0; c < caffeWeight.channels(); c++){
-                            for(int h = 0; h < caffeWeight.height(); h++){
-                                for(int w = 0; w < caffeWeight.width(); w++){
-                                    float data;
-                                    if(i==0) {
-                                        data = caffeWeight.data_at(n, 2 - c, h, w);
-                                    }else{
-                                        data = caffeWeight.data_at(n, c, h, w);
-                                    }
-
-                                    weight[n][(c * caffeWeight.height() +
-                                               h) * caffeWeight.width() +
-                                               w] = data;
-                                } // width
-                            } // height
-                        } // channel
-                    } // num
-
-                    mshadow::TensorContainer<mshadow::cpu, 2> bias;
-                    bias.Resize(mshadow::Shape2(caffeBias.count(), 1));
-                    for(int b = 0; b < caffeBias.count(); b++){
-                        bias[b] = caffeBias.data_at(b, 0, 0, 0);
-                    }
-
-                    net_trainer->SetWeight(weight, layer_names[i].c_str(), "wmat");
-                    net_trainer->SetWeight(bias, layer_names[i].c_str(), "bias");
-
-                } else {
-                    printf("Ignoring layer %s\n", layer_names[i].c_str());
-                }
-            }
-        }
-
-        inline void SaveModel(const char *savePath) {
-            FILE *fo  = utils::FopenCheck(savePath, "wb");
-            fwrite(&net_type, sizeof(int), 1, fo);
-            utils::FileStream fs(fo);
-            net_trainer->SaveModel(fs);
-            fclose(fo);
-            printf("Model saved\n");
-        }
-
-        inline void SetParam(const char *name , const char *val) {
-            cfg.push_back(std::make_pair(std::string(name), std::string(val)));
-        }
-
-        // create a neural net
-        inline nnet::INetTrainer* CreateNet(void) {
-            nnet::INetTrainer *net = nnet::CreateNet<mshadow::cpu>(net_type);
-
-            for (size_t i = 0; i < cfg.size(); ++ i) {
-                net->SetParam(cfg[i].first.c_str(), cfg[i].second.c_str());
-            }
-            return net;
-        }
-
-    private:
-        /*! \brief type of net implementation */
-        int net_type;
-        /*! \brief trainer */
-        nnet::CXXNetThreadTrainer<cpu> *net_trainer;
-    private:
-        /*! \brief all the configurations */
-        std::vector<std::pair<std::string, std::string> > cfg;
-        caffe::shared_ptr<caffe::Net<float> > caffe_net;
-    };
+  private:
+    /*! \brief type of net implementation */
+    int net_type_;
+    /*! \brief trainer */
+    nnet::CXXNetThreadTrainer<cpu> *net_trainer_;
+  private:
+    /*! \brief all the configurations */
+    std::vector<std::pair<std::string, std::string> > cfg_;
+    /*! \brief caffe net reference */
+    caffe::shared_ptr<caffe::Net<float> > caffe_net_;
+  };
 }
 
-int main(int argc, char *argv[]){
-    cxxnet::CaffeConverter converter;
-    converter.convert(argc, argv);
-    return 0;
+int main(int argc, char *argv[]) {
+  cxxnet::CaffeConverter converter;
+  converter.Convert(argc, argv);
+  return 0;
 }
